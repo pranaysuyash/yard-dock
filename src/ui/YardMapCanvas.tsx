@@ -1,5 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { DockDoor, YardSpot, JockeyWorkOrder, DetentionClock } from '../engine/types';
+import {
+  resolveLocationCoordinate,
+  buildYardTrajectory,
+  interpolateSpotterPosition,
+  SpotterWaypoint,
+} from '../engine/hostlerSimulation';
 
 interface YardMapCanvasProps {
   doors: DockDoor[];
@@ -13,19 +19,106 @@ interface YardMapCanvasProps {
   onQuickMove?: (trailerNumber: string, fromLocation: string, toLocation: string) => void;
 }
 
+interface ActiveMovePreset {
+  id: string;
+  label: string;
+  trailerNumber: string;
+  sourceLocation: string;
+  targetLocation: string;
+}
+
+const PRESET_MOVES: ActiveMovePreset[] = [
+  {
+    id: 'move-1',
+    label: 'Spot A-1 ➔ Dock D-03',
+    trailerNumber: 'TLR-9042',
+    sourceLocation: 'Spot A-1',
+    targetLocation: 'D-03',
+  },
+  {
+    id: 'move-2',
+    label: 'Dock D-08 ➔ Lot B-5',
+    trailerNumber: 'TLR-8120',
+    sourceLocation: 'D-08',
+    targetLocation: 'B-5',
+  },
+  {
+    id: 'move-3',
+    label: 'Gate 1 ➔ Spot A-2',
+    trailerNumber: 'TLR-5541',
+    sourceLocation: 'Gate 1',
+    targetLocation: 'Spot A-2',
+  },
+];
+
 export function YardMapCanvas({
   doors,
   spots,
-  jockeyTasks,
+  jockeyTasks: _jockeyTasks,
   detentionClocks,
   selectedDoorId,
   selectedSpotId,
   onSelectDoor,
   onSelectSpot,
-  onQuickMove: _onQuickMove,
+  onQuickMove,
 }: YardMapCanvasProps) {
   const [filterMode, setFilterMode] = useState<'ALL' | 'REEFER' | 'DRY_VAN' | 'DETENTION'>('ALL');
   const [hoveredElement, setHoveredElement] = useState<string | null>(null);
+
+  // Hostler Spotter simulation state
+  const [selectedMove, setSelectedMove] = useState<ActiveMovePreset>(PRESET_MOVES[0]);
+  const [isSimulating, setIsSimulating] = useState<boolean>(false);
+  const [simProgress, setSimProgress] = useState<number>(0); // 0.0 to 1.0
+  const [simSpeed, setSimSpeed] = useState<number>(1); // 1x, 2x, 4x
+
+  // Build waypoints for current active move
+  const waypoints: SpotterWaypoint[] = useMemo(() => {
+    const startPos = { x: 460, y: 165 }; // Default hostler home base
+    const sourcePos = resolveLocationCoordinate(selectedMove.sourceLocation);
+    const targetPos = resolveLocationCoordinate(selectedMove.targetLocation);
+    return buildYardTrajectory(startPos, sourcePos, targetPos);
+  }, [selectedMove]);
+
+  // Current interpolated kinematics
+  const spotter = useMemo(() => {
+    return interpolateSpotterPosition(waypoints, simProgress);
+  }, [waypoints, simProgress]);
+
+  // Animation frame loop
+  useEffect(() => {
+    if (!isSimulating) return;
+
+    const interval = setInterval(() => {
+      setSimProgress((prev) => {
+        const next = prev + 0.0035 * simSpeed;
+        if (next >= 1.0) {
+          setIsSimulating(false);
+          onQuickMove?.(
+            selectedMove.trailerNumber,
+            selectedMove.sourceLocation,
+            selectedMove.targetLocation
+          );
+          return 1.0;
+        }
+        return next;
+      });
+    }, 25);
+
+    return () => clearInterval(interval);
+  }, [isSimulating, simSpeed, selectedMove, onQuickMove]);
+
+  const handleStartMove = (preset: ActiveMovePreset) => {
+    setSelectedMove(preset);
+    setSimProgress(0);
+    setIsSimulating(true);
+  };
+
+  const handleResetMove = () => {
+    setIsSimulating(false);
+    setSimProgress(0);
+  };
+
+  const etaSeconds = Math.max(0, Math.round((1 - simProgress) * 20 / simSpeed));
 
   // Helper to find detention info for a trailer
   const getDetention = (trailerId?: string) => {
@@ -33,19 +126,18 @@ export function YardMapCanvas({
     return detentionClocks.find((c) => c.trailerNumber === trailerId);
   };
 
-  // Find active jockey work order for rendering path
-  const activeTask = jockeyTasks.find((t) => t.status === 'IN_PROGRESS' || t.status === 'PENDING');
-
   return (
     <div className="yard-map-canvas-container" style={{ position: 'relative', width: '100%', borderRadius: '10px', overflow: 'hidden' }}>
-      {/* Map Control Bar */}
+      {/* Map Control Bar & Hostler Dispatch HUD */}
       <div
         style={{
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '10px',
           padding: '10px 16px',
-          background: 'rgba(15, 23, 42, 0.85)',
+          background: 'rgba(15, 23, 42, 0.95)',
           borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
           fontSize: '12px',
         }}
@@ -72,9 +164,77 @@ export function YardMapCanvas({
             </button>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: '16px', color: 'var(--text-muted)', fontSize: '11px' }}>
-          <span>🏢 DC Facility Blueprint v2.4</span>
-          <span>⚡ Live Telemetry Linked</span>
+
+        {/* Spotter Dispatch Actions */}
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 700, color: '#38bdf8', fontSize: '11px' }}>🚜 SPOT-3 DISPATCH:</span>
+          {PRESET_MOVES.map((preset) => (
+            <button
+              key={preset.id}
+              onClick={() => handleStartMove(preset)}
+              style={{
+                background: selectedMove.id === preset.id && isSimulating ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.05)',
+                color: selectedMove.id === preset.id ? '#38bdf8' : '#94a3b8',
+                border: selectedMove.id === preset.id ? '1px solid #38bdf8' : '1px solid rgba(255, 255, 255, 0.1)',
+                padding: '4px 8px',
+                borderRadius: '5px',
+                fontSize: '11px',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              {preset.label}
+            </button>
+          ))}
+
+          {/* Play/Pause & Reset Controls */}
+          <button
+            onClick={() => setIsSimulating(!isSimulating)}
+            style={{
+              background: isSimulating ? '#ef4444' : '#10b981',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '5px',
+              padding: '4px 10px',
+              fontSize: '11px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            {isSimulating ? '⏸ Pause' : simProgress > 0 && simProgress < 1 ? '▶ Resume' : '▶ Start Move'}
+          </button>
+
+          <button
+            onClick={handleResetMove}
+            style={{
+              background: 'rgba(255, 255, 255, 0.08)',
+              color: '#cbd5e1',
+              border: '1px solid rgba(255, 255, 255, 0.15)',
+              borderRadius: '5px',
+              padding: '4px 8px',
+              fontSize: '11px',
+              cursor: 'pointer',
+            }}
+          >
+            ↺ Reset
+          </button>
+
+          {/* Speed Dial */}
+          <button
+            onClick={() => setSimSpeed((prev) => (prev === 1 ? 2 : prev === 2 ? 4 : 1))}
+            style={{
+              background: 'rgba(56, 189, 248, 0.15)',
+              color: '#38bdf8',
+              border: '1px solid rgba(56, 189, 248, 0.3)',
+              borderRadius: '5px',
+              padding: '4px 8px',
+              fontSize: '11px',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >
+            {simSpeed}x SPEED
+          </button>
         </div>
       </div>
 
@@ -236,25 +396,124 @@ export function YardMapCanvas({
           ◄ ONE-WAY YARD CIRCULATION APRON (MAX 10 MPH) ►
         </text>
 
-        {/* Hostler Movement Active Vector Path (if active task) */}
-        {activeTask && (
+        {/* Animated Spotter Waypoint Vector Guidance Path */}
+        {waypoints.length > 1 && (
           <g>
-            <path
-              d="M 220 280 C 350 210, 480 200, 150 145"
+            <polyline
+              points={waypoints.map((w) => `${w.x},${w.y}`).join(' ')}
               fill="none"
               stroke="#06b6d4"
               strokeWidth="2.5"
               strokeDasharray="6 4"
+              opacity="0.85"
             />
-            {/* Hostler Spotter Tractor icon */}
-            <g transform="translate(320, 200)">
-              <rect x="-14" y="-8" width="28" height="16" rx="3" fill="#0891b2" stroke="#67e8f9" strokeWidth="1.5" />
-              <text x="0" y="3" fill="#fff" fontSize="8" fontWeight="800" textAnchor="middle">
-                SPOT-3
-              </text>
-            </g>
+            {/* Target waypoint beacon */}
+            {waypoints.length > 0 && (
+              <circle
+                cx={waypoints[waypoints.length - 1].x}
+                cy={waypoints[waypoints.length - 1].y}
+                r="8"
+                fill="none"
+                stroke="#38bdf8"
+                strokeWidth="2"
+                filter="url(#glow)"
+              />
+            )}
           </g>
         )}
+
+        {/* Hostler Spotter Tractor (Ottawa T2) & Coupled Trailer */}
+        <g transform={`translate(${spotter.x}, ${spotter.y}) rotate(${spotter.headingDeg})`}>
+          {/* If fifth wheel is engaged, render the coupled trailer following the tractor */}
+          {spotter.fifthWheelEngaged && (
+            <g transform="translate(-46, 0)">
+              {/* 53ft Trailer Chassis */}
+              <rect
+                x="-28"
+                y="-10"
+                width="56"
+                height="20"
+                rx="2"
+                fill="#1e3a5f"
+                stroke="#38bdf8"
+                strokeWidth="1.2"
+              />
+              <text x="0" y="3" fill="#ffffff" fontSize="7" fontWeight="700" textAnchor="middle">
+                {selectedMove.trailerNumber}
+              </text>
+              {/* Kingpin Link line */}
+              <line x1="28" y1="0" x2="36" y2="0" stroke="#f59e0b" strokeWidth="2.5" />
+              {/* Dual Tandem Tires */}
+              <rect x="-24" y="-13" width="10" height="3" fill="#0f172a" rx="1" />
+              <rect x="-24" y="10" width="10" height="3" fill="#0f172a" rx="1" />
+            </g>
+          )}
+
+          {/* Ottawa T2 Spotter Tractor Body */}
+          <rect
+            x="-16"
+            y="-9"
+            width="32"
+            height="18"
+            rx="3"
+            fill="#0891b2"
+            stroke="#67e8f9"
+            strokeWidth="1.5"
+          />
+
+          {/* Driver Cab */}
+          <rect
+            x="0"
+            y="-7"
+            width="12"
+            height="14"
+            rx="2"
+            fill="#0284c7"
+            stroke="#38bdf8"
+            strokeWidth="1"
+          />
+          {/* Panoramic Windshield */}
+          <rect
+            x="5"
+            y="-5"
+            width="5"
+            height="10"
+            rx="1"
+            fill="#bae6fd"
+            opacity="0.85"
+          />
+
+          {/* Rotating Amber Beacon */}
+          <circle
+            cx="4"
+            cy="0"
+            r="3"
+            fill={spotter.speedMph > 0 ? '#f59e0b' : '#64748b'}
+            filter={spotter.speedMph > 0 ? 'url(#glow)' : undefined}
+          />
+
+          {/* Fifth-Wheel Plate */}
+          <circle
+            cx="-8"
+            cy="0"
+            r="4.5"
+            fill={spotter.fifthWheelEngaged ? '#f59e0b' : '#1e293b'}
+            stroke="#94a3b8"
+            strokeWidth="1"
+          />
+
+          {/* SPOT-3 Badge Text */}
+          <text
+            x="-1"
+            y="3"
+            fill="#ffffff"
+            fontSize="6"
+            fontWeight="900"
+            textAnchor="middle"
+          >
+            SPOT-3
+          </text>
+        </g>
 
         {/* DROP LOT A (Left Side) */}
         <g>
@@ -386,6 +645,58 @@ export function YardMapCanvas({
           </text>
         </g>
       </svg>
+
+      {/* Spotter Live Telemetry Bar (Bottom HUD) */}
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '12px',
+          padding: '8px 16px',
+          background: 'rgba(10, 15, 29, 0.95)',
+          borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+          fontSize: '11px',
+          fontFamily: 'monospace',
+          color: '#94a3b8',
+        }}
+      >
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+          <div>
+            TRACTOR: <span style={{ color: '#38bdf8', fontWeight: 700 }}>SPOT-3 (Ottawa T2)</span>
+          </div>
+          <div>
+            PHASE:{' '}
+            <span
+              style={{
+                color: spotter.phase === 'HAULING' ? '#38bdf8' : spotter.phase === 'COUPLING' ? '#f59e0b' : '#10b981',
+                fontWeight: 700,
+              }}
+            >
+              {spotter.phase} ({spotter.speedMph.toFixed(1)} MPH)
+            </span>
+          </div>
+          <div>
+            5th WHEEL:{' '}
+            <span style={{ color: spotter.fifthWheelEngaged ? '#10b981' : '#64748b' }}>
+              {spotter.fifthWheelEngaged ? `LOCKED (${spotter.boomPressurePsi} PSI)` : 'DISENGAGED'}
+            </span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+          <div>
+            PROGRESS: <span style={{ color: '#fff', fontWeight: 700 }}>{Math.round(simProgress * 100)}%</span>
+          </div>
+          <div>
+            ETA:{' '}
+            <span style={{ color: isSimulating ? '#38bdf8' : '#94a3b8', fontWeight: 700 }}>
+              {isSimulating ? `${etaSeconds}s remaining` : simProgress >= 1 ? 'ARRIVED' : 'STANDBY'}
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

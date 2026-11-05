@@ -1,18 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { SuiteDock } from './SuiteDock';
 import {
   INITIAL_DOCK_DOORS,
   INITIAL_YARD_SPOTS,
   INITIAL_JOCKEY_TASKS,
   calculateDetentionClock,
-  processGateCheckIn,
   createJockeyMoveOrder,
 } from '../engine/yardEngine';
-import { DockDoor, YardSpot, JockeyWorkOrder, DetentionClock, DoorCommodityType } from '../engine/types';
+import { DockDoor, YardSpot, JockeyWorkOrder, DetentionClock } from '../engine/types';
 import { buildWarehouseInboundBridgeUrl, buildCarrierVettingBridgeUrl } from '../engine/bridges';
 import { platformBus } from '../engine/platformBus';
 import { DockAllocationTask } from './DockAllocationTask';
 import { YardMapCanvas } from './YardMapCanvas';
+import { GuardShackKioskModal } from './GuardShackKioskModal';
+import { DigitalGatePass } from '../engine/guardShackKiosk';
 
 export function App() {
   const [doors, setDoors] = useState<DockDoor[]>(INITIAL_DOCK_DOORS);
@@ -32,16 +33,8 @@ export function App() {
     if (spot) setSelectedDoorId(null);
   };
 
-  // Gate Check-in Modal Form state
+  // Gate Check-in Modal state
   const [showCheckInModal, setShowCheckInModal] = useState(false);
-  const [driverName, setDriverName] = useState('Carlos Gomez');
-  const [driverPhone, setDriverPhone] = useState('(312) 555-8910');
-  const [tractorPlate, setTractorPlate] = useState('IL-8924-TR');
-  const [trailerNumber, setTrailerNumber] = useState('TLR-3991-RF');
-  const [carrierDot, setCarrierDot] = useState('3194012');
-  const [carrierName, setCarrierName] = useState('Polar Express Logistics LLC');
-  const [sealNumber, setSealNumber] = useState('SEAL-448201');
-  const [commodityType, setCommodityType] = useState<DoorCommodityType>('REEFER');
   const [checkInNotice, setCheckInNotice] = useState<string | null>(null);
 
   // Active detention clocks (simulated for current trailers)
@@ -68,64 +61,42 @@ export function App() {
   const occupiedSpots = spots.filter((s) => s.status === 'OCCUPIED').length;
   const detainedCount = detentionClocks.filter((c) => c.isDetained).length;
 
-  const handleGateCheckIn = (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-    const { record, allocatedDoor, allocatedSpot } = processGateCheckIn(
-      `CNF-${Math.floor(10000 + Math.random() * 90000)}`,
-      driverName,
-      driverPhone,
-      tractorPlate,
-      trailerNumber,
-      carrierDot,
-      sealNumber,
-      false,
-      commodityType,
-      doors,
-      spots
-    );
-
-    if (allocatedDoor) {
+  const handleSuccessfulGateIn = (
+    gatePass: DigitalGatePass,
+    allocatedDoorId?: string,
+    allocatedSpotId?: string
+  ) => {
+    if (allocatedDoorId) {
       setDoors((prev) =>
         prev.map((d) =>
-          d.doorId === allocatedDoor.doorId
-            ? { ...d, status: 'OCCUPIED', assignedTrailerId: trailerNumber, currentPalletCount: 26, estimatedClearMinutes: 60 }
+          d.doorId === allocatedDoorId
+            ? { ...d, status: 'OCCUPIED', assignedTrailerId: gatePass.trailerNumber, estimatedClearMinutes: 45 }
             : d
         )
       );
-      setCheckInNotice(`✅ Check-In Approved! Assigned to DOCK DOOR #${allocatedDoor.doorNumber} (${allocatedDoor.type})`);
-      platformBus.publish('DOCK_DOOR_SPOTTED', {
-        doorNumber: allocatedDoor.doorNumber,
-        trailerNumber,
-        commodityType,
-        timestamp: new Date().toISOString(),
-      });
-    } else if (allocatedSpot) {
-      setSpots((prev) =>
-        prev.map((s) => (s.spotId === allocatedSpot.spotId ? { ...s, status: 'OCCUPIED', trailerId: trailerNumber } : s))
-      );
-      setCheckInNotice(`⚠️ All ${commodityType} Doors Full. Staged to DROP LOT ${allocatedSpot.spotNumber}`);
     }
-
-    // Add new detention clock
+    if (allocatedSpotId) {
+      setSpots((prev) =>
+        prev.map((s) =>
+          s.spotId === allocatedSpotId
+            ? { ...s, status: 'OCCUPIED', trailerId: gatePass.trailerNumber }
+            : s
+        )
+      );
+    }
     setDetentionClocks((prev) => [
-      calculateDetentionClock(trailerNumber, carrierName, record.checkInTimestamp),
+      calculateDetentionClock(gatePass.trailerNumber, gatePass.carrierName, gatePass.issuedAt),
       ...prev,
     ]);
-
     platformBus.publish('TRAILER_GATED_IN', {
-      checkInId: record.checkInId,
-      trailerNumber,
-      carrierDot,
-      doorNumber: allocatedDoor?.doorNumber,
-      spotNumber: allocatedSpot?.spotNumber,
-      timestamp: record.checkInTimestamp,
+      checkInId: gatePass.gatePassId,
+      trailerNumber: gatePass.trailerNumber,
+      carrierDot: '3819401',
+      doorNumber: allocatedDoorId ? parseInt(allocatedDoorId.replace(/\D/g, ''), 10) || undefined : undefined,
+      spotNumber: allocatedSpotId,
+      timestamp: gatePass.issuedAt,
     });
-
-    setShowCheckInModal(false);
-    } catch (error) {
-      setCheckInNotice(error instanceof Error ? error.message : 'Gate check-in failed. Please retry.');
-    }
+    setCheckInNotice(`Digital Gate Pass ${gatePass.gatePassId} issued! Assigned to ${gatePass.assignedLocationName}.`);
   };
 
   const handleCompleteJockeyTask = (orderId: string) => {
@@ -499,74 +470,14 @@ export function App() {
       </div>
       </main>
 
-      {/* Gate Check-In Modal */}
-      {showCheckInModal && (
-        <div className="modal-backdrop">
-          <div className="modal-card">
-            <div className="modal-header">
-              <h3>Scenario Driver Gate Arrival & Manual Check-In</h3>
-              <button className="modal-close" onClick={() => setShowCheckInModal(false)}>✕</button>
-            </div>
-            <form onSubmit={handleGateCheckIn} className="modal-form">
-              <div className="form-row">
-                <label>
-                  Driver Full Name:
-                  <input type="text" value={driverName} onChange={(e) => setDriverName(e.target.value)} required />
-                </label>
-                <label>
-                  Driver Cell Phone:
-                  <input type="text" value={driverPhone} onChange={(e) => setDriverPhone(e.target.value)} required />
-                </label>
-              </div>
-
-              <div className="form-row">
-                <label>
-                  Tractor Plate (manual):
-                  <input type="text" value={tractorPlate} onChange={(e) => setTractorPlate(e.target.value)} required />
-                </label>
-                <label>
-                  Trailer Unit Number:
-                  <input type="text" value={trailerNumber} onChange={(e) => setTrailerNumber(e.target.value)} required />
-                </label>
-              </div>
-
-              <div className="form-row">
-                <label>
-                  Carrier DOT:
-                  <input type="text" value={carrierDot} onChange={(e) => setCarrierDot(e.target.value)} required />
-                </label>
-                <label>
-                  Carrier Name:
-                  <input type="text" value={carrierName} onChange={(e) => setCarrierName(e.target.value)} required />
-                </label>
-              </div>
-
-              <div className="form-row">
-                <label>
-                  Commodity Classification:
-                  <select value={commodityType} onChange={(e) => setCommodityType(e.target.value as DoorCommodityType)}>
-                    <option value="REEFER">Refrigerated / Cold-Chain (-10°F to 34°F)</option>
-                    <option value="DRY_VAN">Standard Dry Van Freight</option>
-                    <option value="FLATBED">Flatbed / Specialized Unload</option>
-                  </select>
-                </label>
-              </div>
-
-              <div className="form-row">
-                <label>
-                  Security Seal Number:
-                  <input type="text" value={sealNumber} onChange={(e) => setSealNumber(e.target.value)} required />
-                </label>
-              </div>
-
-              <div className="modal-actions">
-                <button type="button" className="btn-secondary" onClick={() => setShowCheckInModal(false)}>Cancel</button>
-                <button type="submit" className="btn-primary">Record Scenario Gate-In ➔</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Driver Fast Gate Check-In & Gate Pass Kiosk */}
+      <GuardShackKioskModal
+        isOpen={showCheckInModal}
+        onClose={() => setShowCheckInModal(false)}
+        currentDoors={doors}
+        currentSpots={spots}
+        onSuccessfulGateIn={handleSuccessfulGateIn}
+      />
     </div>
   );
 }
